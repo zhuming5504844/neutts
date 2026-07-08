@@ -9,6 +9,7 @@ which bundles espeak-ng, while avoiding editable-package CMake builds on Windows
 
 from __future__ import annotations
 
+import faulthandler
 import importlib
 import os
 import queue
@@ -22,6 +23,8 @@ from tkinter import BOTH, DISABLED, END, LEFT, NORMAL, RIGHT, filedialog, messag
 import tkinter as tk
 
 APP_DIR = Path(__file__).resolve().parent
+CRASH_LOG = APP_DIR / "gui-crash.log"
+_crash_log_handle = None
 DEFAULT_TEXT = (
     "My name is Andy. I'm 25 and I just moved to London. The underground is "
     "pretty confusing, but it gets me around in no time at all."
@@ -56,6 +59,30 @@ UNINSTALL_PACKAGES = [
     "resemble-perth",
     "phonemizer",
 ]
+
+
+def enable_crash_diagnostics() -> None:
+    """Write Python and native crash details to gui-crash.log.
+
+    This is intentionally enabled in normal GUI runs because some failures inside
+    Tk, PyTorch, audio backends, or native DLLs can terminate the process before
+    Tkinter has a chance to show an error dialog.
+    """
+    global _crash_log_handle
+    if _crash_log_handle is not None:
+        return
+    _crash_log_handle = CRASH_LOG.open("a", encoding="utf-8")
+    _crash_log_handle.write("\n===== NeuTTS GUI session start =====\n")
+    _crash_log_handle.flush()
+    faulthandler.enable(file=_crash_log_handle, all_threads=True)
+
+
+def write_crash_diagnostic(message: str) -> None:
+    try:
+        with CRASH_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(message.rstrip() + "\n")
+    except OSError:
+        pass
 
 
 class NeuTTSGui(tk.Tk):
@@ -242,6 +269,7 @@ class NeuTTSGui(tk.Tk):
         self.log = tk.Text(parent, height=24, wrap="word", bg="#020617", fg="#d1d5db", relief="flat", padx=10, pady=10, font=("Consolas", 9))
         self.log.pack(fill=BOTH, expand=True, pady=(8, 0))
         self._log("准备就绪。建议先点击“一键安装依赖”。")
+        self._log(f"诊断日志: {CRASH_LOG}")
 
     def _path_row(self, parent: ttk.Frame, label: str, variable: tk.StringVar, filetypes: list[tuple[str, str]], save: bool = False) -> None:
         row = ttk.Frame(parent, style="Card.TFrame")
@@ -412,8 +440,10 @@ class NeuTTSGui(tk.Tk):
             try:
                 func()
                 self.log_queue.put(("done", "任务完成。"))
-            except Exception:
-                self.log_queue.put(("error", traceback.format_exc()))
+            except BaseException:
+                details = traceback.format_exc()
+                write_crash_diagnostic(details)
+                self.log_queue.put(("error", details))
         self.worker = threading.Thread(target=wrapped, daemon=True)
         self.worker.start()
 
@@ -467,7 +497,13 @@ class NeuTTSGui(tk.Tk):
 
 
 def main() -> None:
-    NeuTTSGui().mainloop()
+    enable_crash_diagnostics()
+    try:
+        NeuTTSGui().mainloop()
+    except BaseException:
+        details = traceback.format_exc()
+        write_crash_diagnostic(details)
+        raise
 
 
 if __name__ == "__main__":
