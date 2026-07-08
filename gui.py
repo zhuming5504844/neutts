@@ -52,7 +52,15 @@ DEFAULT_VOICE_ROLE = "Jo（默认女声）"
 DEFAULT_SPEED = 0
 DEFAULT_VOLUME = 0
 DEFAULT_PITCH = 0
-CORE_DEPENDENCIES = ["neutts==1.2.0"]
+CORE_DEPENDENCIES = [
+    "neutts==1.2.0",
+    "numpy~=2.2.6",
+    "pyarrow<21",
+    "pandas<3",
+    "scikit-learn<1.8",
+    "datasets<4",
+]
+REPAIR_DEPENDENCIES = ["--force-reinstall", *CORE_DEPENDENCIES]
 UNINSTALL_PACKAGES = [
     "neutts",
     "neucodec",
@@ -350,8 +358,8 @@ class NeuTTSGui(tk.Tk):
         ttk.Label(
             parent,
             text=(
-                "推荐安装会安装官方 neutts 轮子（含 espeak-ng），避免本地 CMake/nmake 构建失败；"
-                "GGUF/流式模型需要另装 llama-cpp-python。"
+                "推荐安装会安装官方 neutts 轮子并限制易崩溃的 pyarrow/pandas 等二进制包版本；"
+                "如仍出现 3221225477，请点“修复二进制依赖”。"
             ),
             style="Hint.TLabel",
             wraplength=360,
@@ -362,8 +370,10 @@ class NeuTTSGui(tk.Tk):
         self.install_button.pack(side=LEFT)
         self.gguf_button = ttk.Button(row, text="安装 GGUF 可选依赖", command=self.install_gguf_dependencies)
         self.gguf_button.pack(side=LEFT, padx=8)
+        self.repair_button = ttk.Button(row, text="修复二进制依赖", command=self.repair_binary_dependencies)
+        self.repair_button.pack(side=LEFT)
         self.uninstall_button = ttk.Button(row, text="一键卸载", command=self.uninstall_dependencies)
-        self.uninstall_button.pack(side=LEFT)
+        self.uninstall_button.pack(side=LEFT, padx=(8, 0))
         self.progress = ttk.Progressbar(parent, mode="indeterminate")
         self.progress.pack(fill="x", pady=14)
 
@@ -393,6 +403,12 @@ class NeuTTSGui(tk.Tk):
         # CMake and fails on many Windows machines without nmake or C++ tools.
         # --only-binary prevents pip from falling back to a local source build.
         self._run_command([sys.executable, "-m", "pip", "install", "--only-binary=:all:", *CORE_DEPENDENCIES], "正在安装 NeuTTS 官方运行包...")
+
+    def repair_binary_dependencies(self) -> None:
+        self._run_command(
+            [sys.executable, "-m", "pip", "install", "--only-binary=:all:", *REPAIR_DEPENDENCIES],
+            "正在重装稳定二进制依赖...",
+        )
 
     def install_gguf_dependencies(self) -> None:
         if sys.platform.startswith("win"):
@@ -558,6 +574,13 @@ class NeuTTSGui(tk.Tk):
             self._log_threadsafe(line.rstrip())
         return_code = process.wait()
         if return_code != 0:
+            if return_code == 3221225477:
+                raise RuntimeError(
+                    "子进程发生 Windows access violation (3221225477)。"
+                    "这通常是 pyarrow/pandas/scikit-learn/datasets 等二进制包版本冲突或损坏。"
+                    "请点击“修复二进制依赖”后重试；若仍失败，建议使用干净 Python 3.11/3.12 虚拟环境。"
+                    f" 命令: {' '.join(cmd)}"
+                )
             raise RuntimeError(f"子进程失败，退出码 {return_code}: {' '.join(cmd)}")
 
     def _run_command(self, cmd: list[str], title: str) -> None:
@@ -584,7 +607,7 @@ class NeuTTSGui(tk.Tk):
 
     def _set_busy(self, busy: bool) -> None:
         state = DISABLED if busy else NORMAL
-        for button in (self.generate_button, self.install_button, self.gguf_button, self.uninstall_button):
+        for button in (self.generate_button, self.install_button, self.gguf_button, self.repair_button, self.uninstall_button):
             button.configure(state=state)
         self.progress.start(12) if busy else self.progress.stop()
 
