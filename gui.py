@@ -3,12 +3,13 @@
 The GUI intentionally uses only the Python standard-library (tkinter) so it can
 open before project dependencies are installed. Use the "Install dependencies"
 button once after downloading the repository, then generate speech from the same
-window. The default install intentionally installs runtime dependencies directly,
-avoiding editable-package CMake builds and optional llama-cpp-python on Windows.
+window. The default install intentionally installs the published NeuTTS wheel,
+which bundles espeak-ng, while avoiding editable-package CMake builds on Windows.
 """
 
 from __future__ import annotations
 
+import importlib
 import os
 import queue
 import subprocess
@@ -46,16 +47,7 @@ DEFAULT_VOICE_ROLE = "Jo（默认女声）"
 DEFAULT_SPEED = 0
 DEFAULT_VOLUME = 0
 DEFAULT_PITCH = 0
-CORE_DEPENDENCIES = [
-    "librosa==0.11.0",
-    "neucodec>=0.0.4",
-    "numpy~=2.2.6",
-    "phonemizer>=3.0.0",
-    "resemble-perth==1.0.1",
-    "soundfile==0.13.1",
-    "torch>=2.8.0",
-    "transformers~=4.56.1",
-]
+CORE_DEPENDENCIES = ["neutts==1.2.0"]
 UNINSTALL_PACKAGES = [
     "neutts",
     "neucodec",
@@ -228,7 +220,7 @@ class NeuTTSGui(tk.Tk):
         ttk.Label(
             parent,
             text=(
-                "推荐安装仅安装运行依赖，避免 Windows 缺少 nmake/C++ 编译器时失败；"
+                "推荐安装会安装官方 neutts 轮子（含 espeak-ng），避免本地 CMake/nmake 构建失败；"
                 "GGUF/流式模型需要另装 llama-cpp-python。"
             ),
             style="Hint.TLabel",
@@ -265,11 +257,11 @@ class NeuTTSGui(tk.Tk):
             variable.set(path)
 
     def install_dependencies(self) -> None:
-        # Install runtime dependencies directly instead of `pip install -e .`.
-        # The package itself is importable from this downloaded folder, while
-        # editable installation invokes scikit-build/CMake and fails on many
-        # Windows machines that do not have nmake or C++ build tools installed.
-        self._run_command([sys.executable, "-m", "pip", "install", *CORE_DEPENDENCIES], "正在安装核心运行依赖...")
+        # Install the published wheel instead of `pip install -e .`. The wheel
+        # bundles espeak-ng, while editable installation invokes scikit-build /
+        # CMake and fails on many Windows machines without nmake or C++ tools.
+        # --only-binary prevents pip from falling back to a local source build.
+        self._run_command([sys.executable, "-m", "pip", "install", "--only-binary=:all:", *CORE_DEPENDENCIES], "正在安装 NeuTTS 官方运行包...")
 
     def install_gguf_dependencies(self) -> None:
         if sys.platform.startswith("win"):
@@ -291,10 +283,43 @@ class NeuTTSGui(tk.Tk):
             return
         self._run_python(lambda: self._generate_audio_task(text), "正在生成语音...")
 
+    def _source_has_bundled_espeak(self) -> bool:
+        source_pkg = APP_DIR / "neutts"
+        if sys.platform.startswith("win"):
+            return any(source_pkg.glob("espeak-ng*.dll"))
+        if sys.platform == "darwin":
+            return any(source_pkg.glob("libespeak-ng*.dylib"))
+        return any(source_pkg.glob("libespeak-ng.so*")) or any(source_pkg.glob("libespeak-ng*.so"))
+
+    def _import_neutts_class(self):
+        # A downloaded source tree does not contain the bundled espeak-ng files
+        # until it is built. Prefer the pip-installed NeuTTS wheel in that case,
+        # because the wheel includes espeak-ng and avoids the "espeak not
+        # installed on your system" runtime error on Windows.
+        if not self._source_has_bundled_espeak():
+            app_dir = str(APP_DIR)
+            sys.path[:] = [entry for entry in sys.path if entry not in {"", app_dir}]
+            for name in list(sys.modules):
+                if name == "neutts" or name.startswith("neutts."):
+                    del sys.modules[name]
+            self._log_threadsafe("使用已安装的 NeuTTS 官方包（包含 espeak-ng）。")
+
+        try:
+            module = importlib.import_module("neutts")
+        except RuntimeError as exc:
+            if "espeak" in str(exc).lower():
+                raise RuntimeError(
+                    "未找到 espeak-ng。请先点击“一键安装依赖”安装官方 neutts 轮子；"
+                    "不要使用 pip install -e .，因为本地源码未构建时不包含 espeak-ng。"
+                ) from exc
+            raise
+        return module.NeuTTS
+
     def _generate_audio_task(self, text: str) -> None:
         import soundfile as sf
         import torch
-        from neutts import NeuTTS
+
+        NeuTTS = self._import_neutts_class()
 
         ref_audio = Path(self.ref_audio.get()).expanduser()
         ref_text_value = self.ref_text.get().strip()
