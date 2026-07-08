@@ -3,8 +3,8 @@
 The GUI intentionally uses only the Python standard-library (tkinter) so it can
 open before project dependencies are installed. Use the "Install dependencies"
 button once after downloading the repository, then generate speech from the same
-window. The default install intentionally avoids llama-cpp-python on Windows because
-its source tree can fail on machines without Long Path support.
+window. The default install intentionally installs runtime dependencies directly,
+avoiding editable-package CMake builds and optional llama-cpp-python on Windows.
 """
 
 from __future__ import annotations
@@ -46,6 +46,16 @@ DEFAULT_VOICE_ROLE = "Jo（默认女声）"
 DEFAULT_SPEED = 0
 DEFAULT_VOLUME = 0
 DEFAULT_PITCH = 0
+CORE_DEPENDENCIES = [
+    "librosa==0.11.0",
+    "neucodec>=0.0.4",
+    "numpy~=2.2.6",
+    "phonemizer>=3.0.0",
+    "resemble-perth==1.0.1",
+    "soundfile==0.13.1",
+    "torch>=2.8.0",
+    "transformers~=4.56.1",
+]
 UNINSTALL_PACKAGES = [
     "neutts",
     "neucodec",
@@ -218,7 +228,7 @@ class NeuTTSGui(tk.Tk):
         ttk.Label(
             parent,
             text=(
-                "推荐安装会执行 pip install -e .，可直接使用默认非 GGUF 模型；"
+                "推荐安装仅安装运行依赖，避免 Windows 缺少 nmake/C++ 编译器时失败；"
                 "GGUF/流式模型需要另装 llama-cpp-python。"
             ),
             style="Hint.TLabel",
@@ -255,11 +265,11 @@ class NeuTTSGui(tk.Tk):
             variable.set(path)
 
     def install_dependencies(self) -> None:
-        # Install only required dependencies by default. Pulling .[all] installs
-        # llama-cpp-python, whose bundled llama.cpp tree frequently trips the
-        # Windows MAX_PATH limit during source builds. The default model choices
-        # work without llama-cpp-python, so this keeps the one-click path robust.
-        self._run_command([sys.executable, "-m", "pip", "install", "-e", "."], "正在安装核心依赖...")
+        # Install runtime dependencies directly instead of `pip install -e .`.
+        # The package itself is importable from this downloaded folder, while
+        # editable installation invokes scikit-build/CMake and fails on many
+        # Windows machines that do not have nmake or C++ build tools installed.
+        self._run_command([sys.executable, "-m", "pip", "install", *CORE_DEPENDENCIES], "正在安装核心运行依赖...")
 
     def install_gguf_dependencies(self) -> None:
         if sys.platform.startswith("win"):
