@@ -3,7 +3,8 @@
 The GUI intentionally uses only the Python standard-library (tkinter) so it can
 open before project dependencies are installed. Use the "Install dependencies"
 button once after downloading the repository, then generate speech from the same
-window.
+window. The default install intentionally avoids llama-cpp-python on Windows because
+its source tree can fail on machines without Long Path support.
 """
 
 from __future__ import annotations
@@ -128,13 +129,23 @@ class NeuTTSGui(tk.Tk):
 
     def _build_install_card(self, parent: ttk.Frame) -> None:
         ttk.Label(parent, text="环境管理", style="Card.TLabel", font=("Segoe UI", 15, "bold")).pack(anchor="w")
-        ttk.Label(parent, text="安装按钮会执行 pip install -e .[all]；卸载会移除本项目和常见可选依赖。", style="Hint.TLabel", wraplength=360).pack(anchor="w", pady=(2, 12))
+        ttk.Label(
+            parent,
+            text=(
+                "推荐安装会执行 pip install -e .，可直接使用默认非 GGUF 模型；"
+                "GGUF/流式模型需要另装 llama-cpp-python。"
+            ),
+            style="Hint.TLabel",
+            wraplength=360,
+        ).pack(anchor="w", pady=(2, 12))
         row = ttk.Frame(parent, style="Card.TFrame")
         row.pack(fill="x")
         self.install_button = ttk.Button(row, text="一键安装依赖", style="Accent.TButton", command=self.install_dependencies)
         self.install_button.pack(side=LEFT)
+        self.gguf_button = ttk.Button(row, text="安装 GGUF 可选依赖", command=self.install_gguf_dependencies)
+        self.gguf_button.pack(side=LEFT, padx=8)
         self.uninstall_button = ttk.Button(row, text="一键卸载", command=self.uninstall_dependencies)
-        self.uninstall_button.pack(side=LEFT, padx=8)
+        self.uninstall_button.pack(side=LEFT)
         self.progress = ttk.Progressbar(parent, mode="indeterminate")
         self.progress.pack(fill="x", pady=14)
 
@@ -158,7 +169,19 @@ class NeuTTSGui(tk.Tk):
             variable.set(path)
 
     def install_dependencies(self) -> None:
-        self._run_command([sys.executable, "-m", "pip", "install", "-e", ".[all]"], "正在安装依赖...")
+        # Install only required dependencies by default. Pulling .[all] installs
+        # llama-cpp-python, whose bundled llama.cpp tree frequently trips the
+        # Windows MAX_PATH limit during source builds. The default model choices
+        # work without llama-cpp-python, so this keeps the one-click path robust.
+        self._run_command([sys.executable, "-m", "pip", "install", "-e", "."], "正在安装核心依赖...")
+
+    def install_gguf_dependencies(self) -> None:
+        if sys.platform.startswith("win"):
+            self._log(
+                "提示：Windows 安装 llama-cpp-python 如遇 Long Path 错误，"
+                "请先启用系统长路径支持，或改用默认非 GGUF 模型。"
+            )
+        self._run_command([sys.executable, "-m", "pip", "install", "llama-cpp-python"], "正在安装 GGUF 可选依赖...")
 
     def uninstall_dependencies(self) -> None:
         if not messagebox.askyesno("确认卸载", "将卸载 NeuTTS 及常见可选依赖，是否继续？"):
@@ -210,7 +233,6 @@ class NeuTTSGui(tk.Tk):
 
     def _run_command(self, cmd: list[str], title: str) -> None:
         def task() -> None:
-            self._log_threadsafe(title)
             process = subprocess.Popen(cmd, cwd=APP_DIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
             assert process.stdout is not None
             for line in process.stdout:
@@ -236,7 +258,7 @@ class NeuTTSGui(tk.Tk):
 
     def _set_busy(self, busy: bool) -> None:
         state = DISABLED if busy else NORMAL
-        for button in (self.generate_button, self.install_button, self.uninstall_button):
+        for button in (self.generate_button, self.install_button, self.gguf_button, self.uninstall_button):
             button.configure(state=state)
         self.progress.start(12) if busy else self.progress.stop()
 
