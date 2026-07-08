@@ -34,6 +34,18 @@ BACKBONES = [
     "neuphonic/neutts-nano-german",
     "neuphonic/neutts-nano-spanish",
 ]
+VOICE_ROLES = {
+    "Jo（默认女声）": ("samples/jo.wav", "samples/jo.txt"),
+    "Dave（男声）": ("samples/dave.wav", "samples/dave.txt"),
+    "Greta（女声）": ("samples/greta.wav", "samples/greta.txt"),
+    "Juliette（女声）": ("samples/juliette.wav", "samples/juliette.txt"),
+    "Mateo（男声）": ("samples/mateo.wav", "samples/mateo.txt"),
+    "自定义": ("", ""),
+}
+DEFAULT_VOICE_ROLE = "Jo（默认女声）"
+DEFAULT_SPEED = 0
+DEFAULT_VOLUME = 0
+DEFAULT_PITCH = 0
 UNINSTALL_PACKAGES = [
     "neutts",
     "neucodec",
@@ -105,8 +117,20 @@ class NeuTTSGui(tk.Tk):
         self.ref_audio = tk.StringVar(value=str(APP_DIR / "samples" / "jo.wav"))
         self.ref_text = tk.StringVar(value=str(APP_DIR / "samples" / "jo.txt"))
         self.output_path = tk.StringVar(value=str(APP_DIR / "output.wav"))
+        self.voice_role = tk.StringVar(value=DEFAULT_VOICE_ROLE)
+        self.speed = tk.IntVar(value=DEFAULT_SPEED)
+        self.volume = tk.IntVar(value=DEFAULT_VOLUME)
+        self.pitch = tk.IntVar(value=DEFAULT_PITCH)
         self.backbone = tk.StringVar(value=BACKBONES[0])
         self.device = tk.StringVar(value="cpu")
+
+        role_row = ttk.Frame(parent, style="Card.TFrame")
+        role_row.pack(fill="x", pady=5)
+        ttk.Label(role_row, text="语音角色", style="Card.TLabel", width=14).pack(side=LEFT)
+        role_box = ttk.Combobox(role_row, textvariable=self.voice_role, values=list(VOICE_ROLES), state="readonly")
+        role_box.pack(side=LEFT, fill="x", expand=True, padx=8)
+        role_box.bind("<<ComboboxSelected>>", self._apply_voice_role)
+        ttk.Button(role_row, text="应用", command=self._apply_voice_role).pack(side=LEFT)
 
         self._path_row(parent, "参考音频 .wav", self.ref_audio, [("WAV files", "*.wav"), ("All files", "*.*")])
         self._path_row(parent, "参考文本 .txt", self.ref_text, [("Text files", "*.txt"), ("All files", "*.*")])
@@ -120,12 +144,74 @@ class NeuTTSGui(tk.Tk):
         ttk.Combobox(grid, textvariable=self.device, values=["cpu", "cuda", "mps", "gpu"], state="readonly").grid(row=1, column=1, sticky="ew", padx=(10, 0))
         grid.columnconfigure(1, weight=1)
 
+        self._build_parameter_card(parent)
+
         buttons = ttk.Frame(parent, style="Card.TFrame")
         buttons.pack(fill="x")
         self.generate_button = ttk.Button(buttons, text="开始生成语音", style="Accent.TButton", command=self.generate_audio)
         self.generate_button.pack(side=LEFT)
         ttk.Button(buttons, text="播放输出", command=self.play_output).pack(side=LEFT, padx=8)
         ttk.Button(buttons, text="打开输出目录", command=self.open_output_folder).pack(side=LEFT)
+
+    def _build_parameter_card(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, text="参数调节", style="Card.TLabel", font=("Segoe UI", 13, "bold")).pack(anchor="w", pady=(4, 4))
+        self.speed_value_label = self._slider_row(
+            parent, "🚀 语速 (Speed)", self.speed, -50, 100, "%", DEFAULT_SPEED
+        )
+        self.volume_value_label = self._slider_row(
+            parent, "🔊 音量 (Volume)", self.volume, -50, 50, "%", DEFAULT_VOLUME
+        )
+        self.pitch_value_label = self._slider_row(
+            parent, "🎵 音调 (Pitch)", self.pitch, -12, 12, "", DEFAULT_PITCH
+        )
+
+    def _slider_row(
+        self,
+        parent: ttk.Frame,
+        label: str,
+        variable: tk.IntVar,
+        from_: int,
+        to: int,
+        suffix: str,
+        default: int,
+    ) -> ttk.Label:
+        row = ttk.Frame(parent, style="Card.TFrame")
+        row.pack(fill="x", pady=5)
+        header = ttk.Frame(row, style="Card.TFrame")
+        header.pack(fill="x")
+        ttk.Label(header, text=label, style="Card.TLabel").pack(side=LEFT)
+        value_label = ttk.Label(header, text=self._format_slider_value(variable.get(), suffix), style="Hint.TLabel")
+        value_label.pack(side=RIGHT)
+        scale = ttk.Scale(row, from_=from_, to=to, orient="horizontal", command=lambda value: self._on_slider_change(variable, value, value_label, suffix))
+        scale.set(variable.get())
+        scale.pack(fill="x", pady=(4, 2))
+        footer = ttk.Frame(row, style="Card.TFrame")
+        footer.pack(fill="x")
+        ttk.Label(footer, text=str(from_), style="Hint.TLabel").pack(side=LEFT)
+        ttk.Button(footer, text="重置", command=lambda: self._reset_slider(variable, scale, value_label, suffix, default)).pack(side=LEFT, padx=(150, 0))
+        ttk.Label(footer, text=str(to), style="Hint.TLabel").pack(side=RIGHT)
+        return value_label
+
+    def _format_slider_value(self, value: int, suffix: str) -> str:
+        sign = "+" if value > 0 else ""
+        return f"{sign}{value}{suffix}"
+
+    def _on_slider_change(self, variable: tk.IntVar, value: str, label: ttk.Label, suffix: str) -> None:
+        int_value = int(round(float(value)))
+        variable.set(int_value)
+        label.configure(text=self._format_slider_value(int_value, suffix))
+
+    def _reset_slider(self, variable: tk.IntVar, scale: ttk.Scale, label: ttk.Label, suffix: str, default: int) -> None:
+        variable.set(default)
+        scale.set(default)
+        label.configure(text=self._format_slider_value(default, suffix))
+
+    def _apply_voice_role(self, _event=None) -> None:
+        audio, text = VOICE_ROLES.get(self.voice_role.get(), ("", ""))
+        if not audio or not text:
+            return
+        self.ref_audio.set(str(APP_DIR / audio))
+        self.ref_text.set(str(APP_DIR / text))
 
     def _build_install_card(self, parent: ttk.Frame) -> None:
         ttk.Label(parent, text="环境管理", style="Card.TLabel", font=("Segoe UI", 15, "bold")).pack(anchor="w")
@@ -228,8 +314,32 @@ class NeuTTSGui(tk.Tk):
             torch.save(ref_codes, cache_path)
         self._log_threadsafe("生成音频...")
         wav = tts.infer(text, ref_codes, ref_text_value)
-        sf.write(output, wav, 24000)
+        wav = self._apply_audio_parameters(wav, tts.sample_rate)
+        sf.write(output, wav, tts.sample_rate)
         self._log_threadsafe(f"完成: {output}")
+
+    def _apply_audio_parameters(self, wav, sample_rate: int):
+        import librosa
+        import numpy as np
+
+        audio = np.asarray(wav, dtype=np.float32)
+        speed = self.speed.get()
+        pitch = self.pitch.get()
+        volume = self.volume.get()
+
+        if speed:
+            rate = max(0.25, 1.0 + speed / 100.0)
+            self._log_threadsafe(f"应用语速: {self._format_slider_value(speed, '%')}")
+            audio = librosa.effects.time_stretch(audio, rate=rate)
+        if pitch:
+            self._log_threadsafe(f"应用音调: {self._format_slider_value(pitch, '')} 半音")
+            audio = librosa.effects.pitch_shift(audio, sr=sample_rate, n_steps=pitch)
+        if volume:
+            gain = 1.0 + volume / 100.0
+            self._log_threadsafe(f"应用音量: {self._format_slider_value(volume, '%')}")
+            audio = audio * gain
+
+        return np.clip(audio, -1.0, 1.0)
 
     def _run_command(self, cmd: list[str], title: str) -> None:
         def task() -> None:
