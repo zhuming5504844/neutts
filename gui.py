@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import faulthandler
 import importlib
+import json
 import os
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import traceback
 import webbrowser
@@ -83,6 +85,107 @@ def write_crash_diagnostic(message: str) -> None:
             handle.write(message.rstrip() + "\n")
     except OSError:
         pass
+
+
+def source_has_bundled_espeak() -> bool:
+    source_pkg = APP_DIR / "neutts"
+    if sys.platform.startswith("win"):
+        return any(source_pkg.glob("espeak-ng*.dll"))
+    if sys.platform == "darwin":
+        return any(source_pkg.glob("libespeak-ng*.dylib"))
+    return any(source_pkg.glob("libespeak-ng.so*")) or any(source_pkg.glob("libespeak-ng*.so"))
+
+
+def import_neutts_class_for_worker():
+    if not source_has_bundled_espeak():
+        app_dir = str(APP_DIR)
+        sys.path[:] = [entry for entry in sys.path if entry not in {"", app_dir}]
+        for name in list(sys.modules):
+            if name == "neutts" or name.startswith("neutts."):
+                del sys.modules[name]
+        print("使用已安装的 NeuTTS 官方包（包含 espeak-ng）。", flush=True)
+    module = importlib.import_module("neutts")
+    return module.NeuTTS
+
+
+def format_slider_value(value: int, suffix: str) -> str:
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value}{suffix}"
+
+
+def apply_audio_parameters(wav, sample_rate: int, speed: int, pitch: int, volume: int):
+    import librosa
+    import numpy as np
+
+    audio = np.asarray(wav, dtype=np.float32)
+    if speed:
+        rate = max(0.25, 1.0 + speed / 100.0)
+        print(f"应用语速: {format_slider_value(speed, '%')}", flush=True)
+        audio = librosa.effects.time_stretch(audio, rate=rate)
+    if pitch:
+        print(f"应用音调: {format_slider_value(pitch, '')} 半音", flush=True)
+        audio = librosa.effects.pitch_shift(audio, sr=sample_rate, n_steps=pitch)
+    if volume:
+        gain = 1.0 + volume / 100.0
+        print(f"应用音量: {format_slider_value(volume, '%')}", flush=True)
+        audio = audio * gain
+    return np.clip(audio, -1.0, 1.0)
+
+
+def run_generation_worker(config_path: str) -> int:
+    enable_crash_diagnostics()
+    try:
+        import soundfile as sf
+        import torch
+
+        config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        NeuTTS = import_neutts_class_for_worker()
+
+        text = str(config["text"])
+        ref_audio = Path(str(config["ref_audio"])).expanduser()
+        ref_text_value = str(config["ref_text"]).strip()
+        output = Path(str(config["output_path"])).expanduser()
+        backbone = str(config["backbone"])
+        device = str(config["device"])
+        speed = int(config["speed"])
+        volume = int(config["volume"])
+        pitch = int(config["pitch"])
+
+        if not ref_audio.exists():
+            raise FileNotFoundError(f"参考音频不存在: {ref_audio}")
+        ref_text_path = Path(ref_text_value).expanduser()
+        if ref_text_path.exists():
+            ref_text_value = ref_text_path.read_text(encoding="utf-8").strip()
+        if not ref_text_value:
+            raise ValueError("参考文本不能为空。")
+        output.parent.mkdir(parents=True, exist_ok=True)
+
+        print("加载模型...", flush=True)
+        tts = NeuTTS(
+            backbone_repo=backbone,
+            backbone_device=device,
+            codec_repo="neuphonic/neucodec",
+            codec_device=device if device != "gpu" else "cpu",
+        )
+        cache_path = ref_audio.with_suffix(".pt")
+        if cache_path.exists():
+            print(f"加载已编码参考音频: {cache_path}", flush=True)
+            ref_codes = torch.load(cache_path, map_location="cpu")
+        else:
+            print("编码参考音频...", flush=True)
+            ref_codes = tts.encode_reference(str(ref_audio))
+            torch.save(ref_codes, cache_path)
+        print("生成音频...", flush=True)
+        wav = tts.infer(text, ref_codes, ref_text_value)
+        wav = apply_audio_parameters(wav, tts.sample_rate, speed, pitch, volume)
+        sf.write(output, wav, tts.sample_rate)
+        print(f"完成: {output}", flush=True)
+        return 0
+    except BaseException:
+        details = traceback.format_exc()
+        write_crash_diagnostic(details)
+        print(details, flush=True)
+        return 1
 
 
 class NeuTTSGui(tk.Tk):
@@ -322,7 +425,27 @@ class NeuTTSGui(tk.Tk):
         if not config["text"]:
             messagebox.showwarning("缺少文本", "请输入要朗读的文本。")
             return
-        self._run_python(lambda: self._generate_audio_task(config), "正在生成语音...")
+        self._run_python(lambda: self._generate_audio_subprocess(config), "正在生成语音...")
+
+    def _generate_audio_subprocess(self, config: dict[str, object]) -> None:
+        # Run heavy ML imports/generation in a child Python process. The crash
+        # log showed access violations while importing native pyarrow/torch stack
+        # modules; if that happens in-process, Windows terminates the whole GUI.
+        # Isolating generation keeps the GUI alive and streams the child process
+        # traceback/fatal error into the log.
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False) as handle:
+            json.dump(config, handle, ensure_ascii=False)
+            config_path = handle.name
+        try:
+            cmd = [sys.executable, "-X", "faulthandler", str(Path(__file__).resolve()), "--generate-worker", config_path]
+            env = os.environ.copy()
+            env["PYTHONFAULTHANDLER"] = "1"
+            self._run_subprocess(cmd, env=env)
+        finally:
+            try:
+                Path(config_path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def _source_has_bundled_espeak(self) -> bool:
         source_pkg = APP_DIR / "neutts"
@@ -420,14 +543,26 @@ class NeuTTSGui(tk.Tk):
 
         return np.clip(audio, -1.0, 1.0)
 
+    def _run_subprocess(self, cmd: list[str], env: dict[str, str] | None = None) -> None:
+        process = subprocess.Popen(
+            cmd,
+            cwd=APP_DIR,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert process.stdout is not None
+        for line in process.stdout:
+            self._log_threadsafe(line.rstrip())
+        return_code = process.wait()
+        if return_code != 0:
+            raise RuntimeError(f"子进程失败，退出码 {return_code}: {' '.join(cmd)}")
+
     def _run_command(self, cmd: list[str], title: str) -> None:
         def task() -> None:
-            process = subprocess.Popen(cmd, cwd=APP_DIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-            assert process.stdout is not None
-            for line in process.stdout:
-                self._log_threadsafe(line.rstrip())
-            if process.wait() != 0:
-                raise RuntimeError(f"命令失败: {' '.join(cmd)}")
+            self._run_subprocess(cmd)
         self._run_python(task, title)
 
     def _run_python(self, func, title: str) -> None:
@@ -497,6 +632,9 @@ class NeuTTSGui(tk.Tk):
 
 
 def main() -> None:
+    if len(sys.argv) == 3 and sys.argv[1] == "--generate-worker":
+        raise SystemExit(run_generation_worker(sys.argv[2]))
+
     enable_crash_diagnostics()
     try:
         NeuTTSGui().mainloop()
