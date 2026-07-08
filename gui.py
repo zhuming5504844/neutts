@@ -277,11 +277,24 @@ class NeuTTSGui(tk.Tk):
         self._run_command([sys.executable, "-m", "pip", "uninstall", "-y", *UNINSTALL_PACKAGES], "正在卸载依赖...")
 
     def generate_audio(self) -> None:
-        text = self.text_input.get("1.0", END).strip()
-        if not text:
+        # Read every Tk value on the UI thread before starting the worker.
+        # Accessing Tk widgets/StringVar/IntVar from a background thread can
+        # crash Tcl/Tk on Windows instead of raising a normal Python exception.
+        config = {
+            "text": self.text_input.get("1.0", END).strip(),
+            "ref_audio": self.ref_audio.get(),
+            "ref_text": self.ref_text.get().strip(),
+            "output_path": self.output_path.get(),
+            "backbone": self.backbone.get().strip(),
+            "device": self.device.get().strip(),
+            "speed": self.speed.get(),
+            "volume": self.volume.get(),
+            "pitch": self.pitch.get(),
+        }
+        if not config["text"]:
             messagebox.showwarning("缺少文本", "请输入要朗读的文本。")
             return
-        self._run_python(lambda: self._generate_audio_task(text), "正在生成语音...")
+        self._run_python(lambda: self._generate_audio_task(config), "正在生成语音...")
 
     def _source_has_bundled_espeak(self) -> bool:
         source_pkg = APP_DIR / "neutts"
@@ -315,15 +328,21 @@ class NeuTTSGui(tk.Tk):
             raise
         return module.NeuTTS
 
-    def _generate_audio_task(self, text: str) -> None:
+    def _generate_audio_task(self, config: dict[str, object]) -> None:
         import soundfile as sf
         import torch
 
         NeuTTS = self._import_neutts_class()
 
-        ref_audio = Path(self.ref_audio.get()).expanduser()
-        ref_text_value = self.ref_text.get().strip()
-        output = Path(self.output_path.get()).expanduser()
+        text = str(config["text"])
+        ref_audio = Path(str(config["ref_audio"])).expanduser()
+        ref_text_value = str(config["ref_text"]).strip()
+        output = Path(str(config["output_path"])).expanduser()
+        backbone = str(config["backbone"])
+        device = str(config["device"])
+        speed = int(config["speed"])
+        volume = int(config["volume"])
+        pitch = int(config["pitch"])
         if not ref_audio.exists():
             raise FileNotFoundError(f"参考音频不存在: {ref_audio}")
         if Path(ref_text_value).expanduser().exists():
@@ -334,10 +353,10 @@ class NeuTTSGui(tk.Tk):
 
         self._log_threadsafe("加载模型...")
         tts = NeuTTS(
-            backbone_repo=self.backbone.get().strip(),
-            backbone_device=self.device.get().strip(),
+            backbone_repo=backbone,
+            backbone_device=device,
             codec_repo="neuphonic/neucodec",
-            codec_device=self.device.get().strip() if self.device.get().strip() != "gpu" else "cpu",
+            codec_device=device if device != "gpu" else "cpu",
         )
         cache_path = ref_audio.with_suffix(".pt")
         if cache_path.exists():
@@ -349,18 +368,15 @@ class NeuTTSGui(tk.Tk):
             torch.save(ref_codes, cache_path)
         self._log_threadsafe("生成音频...")
         wav = tts.infer(text, ref_codes, ref_text_value)
-        wav = self._apply_audio_parameters(wav, tts.sample_rate)
+        wav = self._apply_audio_parameters(wav, tts.sample_rate, speed, pitch, volume)
         sf.write(output, wav, tts.sample_rate)
         self._log_threadsafe(f"完成: {output}")
 
-    def _apply_audio_parameters(self, wav, sample_rate: int):
+    def _apply_audio_parameters(self, wav, sample_rate: int, speed: int, pitch: int, volume: int):
         import librosa
         import numpy as np
 
         audio = np.asarray(wav, dtype=np.float32)
-        speed = self.speed.get()
-        pitch = self.pitch.get()
-        volume = self.volume.get()
 
         if speed:
             rate = max(0.25, 1.0 + speed / 100.0)
