@@ -61,6 +61,8 @@ CORE_DEPENDENCIES = [
     "datasets<4",
 ]
 REPAIR_DEPENDENCIES = ["--force-reinstall", *CORE_DEPENDENCIES]
+CUDA_PYTORCH_INDEX_URL = "https://download.pytorch.org/whl/cu128"
+CUDA_PYTORCH_PACKAGES = ["torch", "torchvision", "torchaudio"]
 UNINSTALL_PACKAGES = [
     "neutts",
     "neucodec",
@@ -410,12 +412,17 @@ class NeuTTSGui(tk.Tk):
         row.pack(fill="x")
         self.install_button = ttk.Button(row, text="一键安装依赖", style="Accent.TButton", command=self.install_dependencies)
         self.install_button.pack(side=LEFT)
-        self.gguf_button = ttk.Button(row, text="安装 GGUF 可选依赖", command=self.install_gguf_dependencies)
-        self.gguf_button.pack(side=LEFT, padx=8)
-        self.repair_button = ttk.Button(row, text="修复二进制依赖", command=self.repair_binary_dependencies)
-        self.repair_button.pack(side=LEFT)
-        self.uninstall_button = ttk.Button(row, text="一键卸载", command=self.uninstall_dependencies)
-        self.uninstall_button.pack(side=LEFT, padx=(8, 0))
+        self.cuda_torch_button = ttk.Button(row, text="一键安装 CUDA 版 PyTorch", command=self.install_cuda_pytorch)
+        self.cuda_torch_button.pack(side=LEFT, padx=8)
+
+        optional_row = ttk.Frame(parent, style="Card.TFrame")
+        optional_row.pack(fill="x", pady=(8, 0))
+        self.gguf_button = ttk.Button(optional_row, text="安装 GGUF 可选依赖", command=self.install_gguf_dependencies)
+        self.gguf_button.pack(side=LEFT)
+        self.repair_button = ttk.Button(optional_row, text="修复二进制依赖", command=self.repair_binary_dependencies)
+        self.repair_button.pack(side=LEFT, padx=8)
+        self.uninstall_button = ttk.Button(optional_row, text="一键卸载", command=self.uninstall_dependencies)
+        self.uninstall_button.pack(side=LEFT)
         self.progress = ttk.Progressbar(parent, mode="indeterminate")
         self.progress.pack(fill="x", pady=14)
 
@@ -451,6 +458,37 @@ class NeuTTSGui(tk.Tk):
             [sys.executable, "-m", "pip", "install", "--only-binary=:all:", *REPAIR_DEPENDENCIES],
             "正在重装稳定二进制依赖...",
         )
+
+    def install_cuda_pytorch(self) -> None:
+        def task() -> None:
+            self._log_threadsafe("将从 PyTorch 官方 CUDA 12.8 源安装 torch/torchvision/torchaudio。")
+            self._log_threadsafe("安装完成后请重新点击“开始生成语音”，并选择 cuda 设备。")
+            install_cmd = [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "--force-reinstall",
+                *CUDA_PYTORCH_PACKAGES,
+                "--index-url",
+                CUDA_PYTORCH_INDEX_URL,
+            ]
+            self._run_subprocess(install_cmd)
+            verify_cmd = [
+                sys.executable,
+                "-c",
+                (
+                    "import torch; "
+                    "print('PyTorch:', torch.__version__); "
+                    "print('CUDA available:', torch.cuda.is_available()); "
+                    "print('CUDA runtime:', torch.version.cuda); "
+                    "print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else '不可用')"
+                ),
+            ]
+            self._run_subprocess(verify_cmd)
+
+        self._run_python(task, "正在安装 CUDA 版 PyTorch...")
 
     def install_gguf_dependencies(self) -> None:
         if sys.platform.startswith("win"):
@@ -652,7 +690,14 @@ class NeuTTSGui(tk.Tk):
 
     def _set_busy(self, busy: bool) -> None:
         state = DISABLED if busy else NORMAL
-        for button in (self.generate_button, self.install_button, self.gguf_button, self.repair_button, self.uninstall_button):
+        for button in (
+            self.generate_button,
+            self.install_button,
+            self.cuda_torch_button,
+            self.gguf_button,
+            self.repair_button,
+            self.uninstall_button,
+        ):
             button.configure(state=state)
         self.progress.start(12) if busy else self.progress.stop()
 
