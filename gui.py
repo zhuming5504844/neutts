@@ -116,6 +116,45 @@ def import_neutts_class_for_worker():
     return module.NeuTTS
 
 
+def is_gguf_backbone(backbone: str) -> bool:
+    return backbone.strip().lower().endswith("gguf") or backbone.strip().lower().endswith(".gguf")
+
+
+def resolve_generation_devices(requested_device: str, backbone: str, torch_module, log=print) -> tuple[str, str]:
+    """Return safe NeuTTS backbone/codec devices for the current PyTorch build.
+
+    The GUI may run with a CPU-only torch wheel even on machines that have an
+    NVIDIA GPU. Passing ``cuda`` to NeuTTS in that environment raises
+    ``AssertionError: Torch not compiled with CUDA enabled`` while loading the
+    model. Resolve the requested device before constructing NeuTTS so generation
+    can continue on CPU with an actionable log message.
+    """
+    requested = requested_device.strip().lower() or "cpu"
+    if requested == "gpu":
+        if is_gguf_backbone(backbone):
+            log("使用 GGUF GPU 模式加载文本模型；声码器将使用 CPU。")
+            return "gpu", "cpu"
+        if torch_module.cuda.is_available():
+            log("非 GGUF 模型不支持 'gpu' 设备名，已改用 CUDA。")
+            return "cuda", "cuda"
+        log("当前 PyTorch 不可用 CUDA，非 GGUF 'gpu' 选项已回退到 CPU。")
+        return "cpu", "cpu"
+    if requested == "cuda":
+        if torch_module.cuda.is_available():
+            return "cuda", "cuda"
+        log("当前 PyTorch 未启用/不可用 CUDA，已自动回退到 CPU。若要使用 NVIDIA GPU，请安装 CUDA 版 PyTorch。")
+        return "cpu", "cpu"
+    if requested == "mps":
+        mps_backend = getattr(getattr(torch_module, "backends", None), "mps", None)
+        if mps_backend is not None and mps_backend.is_available():
+            return "mps", "mps"
+        log("当前 PyTorch 不可用 Apple MPS，已自动回退到 CPU。")
+        return "cpu", "cpu"
+    if requested != "cpu":
+        log(f"未知设备 '{requested_device}'，已自动回退到 CPU。")
+    return "cpu", "cpu"
+
+
 def format_slider_value(value: int, suffix: str) -> str:
     sign = "+" if value > 0 else ""
     return f"{sign}{value}{suffix}"
@@ -169,11 +208,14 @@ def run_generation_worker(config_path: str) -> int:
         output.parent.mkdir(parents=True, exist_ok=True)
 
         print("加载模型...", flush=True)
+        backbone_device, codec_device = resolve_generation_devices(
+            device, backbone, torch, log=lambda message: print(message, flush=True)
+        )
         tts = NeuTTS(
             backbone_repo=backbone,
-            backbone_device=device,
+            backbone_device=backbone_device,
             codec_repo="neuphonic/neucodec",
-            codec_device=device if device != "gpu" else "cpu",
+            codec_device=codec_device,
         )
         cache_path = ref_audio.with_suffix(".pt")
         if cache_path.exists():
@@ -519,11 +561,14 @@ class NeuTTSGui(tk.Tk):
         output.parent.mkdir(parents=True, exist_ok=True)
 
         self._log_threadsafe("加载模型...")
+        backbone_device, codec_device = resolve_generation_devices(
+            device, backbone, torch, log=self._log_threadsafe
+        )
         tts = NeuTTS(
             backbone_repo=backbone,
-            backbone_device=device,
+            backbone_device=backbone_device,
             codec_repo="neuphonic/neucodec",
-            codec_device=device if device != "gpu" else "cpu",
+            codec_device=codec_device,
         )
         cache_path = ref_audio.with_suffix(".pt")
         if cache_path.exists():
