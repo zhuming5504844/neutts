@@ -61,6 +61,8 @@ CORE_DEPENDENCIES = [
     "datasets<4",
 ]
 REPAIR_DEPENDENCIES = ["--force-reinstall", *CORE_DEPENDENCIES]
+CUDA_PYTORCH_INDEX_URL = "https://download.pytorch.org/whl/cu128"
+CUDA_PYTORCH_PACKAGES = ["torch", "torchvision", "torchaudio"]
 UNINSTALL_PACKAGES = [
     "neutts",
     "neucodec",
@@ -116,6 +118,45 @@ def import_neutts_class_for_worker():
     return module.NeuTTS
 
 
+def is_gguf_backbone(backbone: str) -> bool:
+    return backbone.strip().lower().endswith("gguf") or backbone.strip().lower().endswith(".gguf")
+
+
+def resolve_generation_devices(requested_device: str, backbone: str, torch_module, log=print) -> tuple[str, str]:
+    """Return safe NeuTTS backbone/codec devices for the current PyTorch build.
+
+    The GUI may run with a CPU-only torch wheel even on machines that have an
+    NVIDIA GPU. Passing ``cuda`` to NeuTTS in that environment raises
+    ``AssertionError: Torch not compiled with CUDA enabled`` while loading the
+    model. Resolve the requested device before constructing NeuTTS so generation
+    can continue on CPU with an actionable log message.
+    """
+    requested = requested_device.strip().lower() or "cpu"
+    if requested == "gpu":
+        if is_gguf_backbone(backbone):
+            log("使用 GGUF GPU 模式加载文本模型；声码器将使用 CPU。")
+            return "gpu", "cpu"
+        if torch_module.cuda.is_available():
+            log("非 GGUF 模型不支持 'gpu' 设备名，已改用 CUDA。")
+            return "cuda", "cuda"
+        log("当前 PyTorch 不可用 CUDA，非 GGUF 'gpu' 选项已回退到 CPU。")
+        return "cpu", "cpu"
+    if requested == "cuda":
+        if torch_module.cuda.is_available():
+            return "cuda", "cuda"
+        log("当前 PyTorch 未启用/不可用 CUDA，已自动回退到 CPU。若要使用 NVIDIA GPU，请安装 CUDA 版 PyTorch。")
+        return "cpu", "cpu"
+    if requested == "mps":
+        mps_backend = getattr(getattr(torch_module, "backends", None), "mps", None)
+        if mps_backend is not None and mps_backend.is_available():
+            return "mps", "mps"
+        log("当前 PyTorch 不可用 Apple MPS，已自动回退到 CPU。")
+        return "cpu", "cpu"
+    if requested != "cpu":
+        log(f"未知设备 '{requested_device}'，已自动回退到 CPU。")
+    return "cpu", "cpu"
+
+
 def format_slider_value(value: int, suffix: str) -> str:
     sign = "+" if value > 0 else ""
     return f"{sign}{value}{suffix}"
@@ -169,11 +210,14 @@ def run_generation_worker(config_path: str) -> int:
         output.parent.mkdir(parents=True, exist_ok=True)
 
         print("加载模型...", flush=True)
+        backbone_device, codec_device = resolve_generation_devices(
+            device, backbone, torch, log=lambda message: print(message, flush=True)
+        )
         tts = NeuTTS(
             backbone_repo=backbone,
-            backbone_device=device,
+            backbone_device=backbone_device,
             codec_repo="neuphonic/neucodec",
-            codec_device=device if device != "gpu" else "cpu",
+            codec_device=codec_device,
         )
         cache_path = ref_audio.with_suffix(".pt")
         if cache_path.exists():
@@ -368,12 +412,17 @@ class NeuTTSGui(tk.Tk):
         row.pack(fill="x")
         self.install_button = ttk.Button(row, text="一键安装依赖", style="Accent.TButton", command=self.install_dependencies)
         self.install_button.pack(side=LEFT)
-        self.gguf_button = ttk.Button(row, text="安装 GGUF 可选依赖", command=self.install_gguf_dependencies)
-        self.gguf_button.pack(side=LEFT, padx=8)
-        self.repair_button = ttk.Button(row, text="修复二进制依赖", command=self.repair_binary_dependencies)
-        self.repair_button.pack(side=LEFT)
-        self.uninstall_button = ttk.Button(row, text="一键卸载", command=self.uninstall_dependencies)
-        self.uninstall_button.pack(side=LEFT, padx=(8, 0))
+        self.cuda_torch_button = ttk.Button(row, text="一键安装 CUDA 版 PyTorch", command=self.install_cuda_pytorch)
+        self.cuda_torch_button.pack(side=LEFT, padx=8)
+
+        optional_row = ttk.Frame(parent, style="Card.TFrame")
+        optional_row.pack(fill="x", pady=(8, 0))
+        self.gguf_button = ttk.Button(optional_row, text="安装 GGUF 可选依赖", command=self.install_gguf_dependencies)
+        self.gguf_button.pack(side=LEFT)
+        self.repair_button = ttk.Button(optional_row, text="修复二进制依赖", command=self.repair_binary_dependencies)
+        self.repair_button.pack(side=LEFT, padx=8)
+        self.uninstall_button = ttk.Button(optional_row, text="一键卸载", command=self.uninstall_dependencies)
+        self.uninstall_button.pack(side=LEFT)
         self.progress = ttk.Progressbar(parent, mode="indeterminate")
         self.progress.pack(fill="x", pady=14)
 
@@ -409,6 +458,37 @@ class NeuTTSGui(tk.Tk):
             [sys.executable, "-m", "pip", "install", "--only-binary=:all:", *REPAIR_DEPENDENCIES],
             "正在重装稳定二进制依赖...",
         )
+
+    def install_cuda_pytorch(self) -> None:
+        def task() -> None:
+            self._log_threadsafe("将从 PyTorch 官方 CUDA 12.8 源安装 torch/torchvision/torchaudio。")
+            self._log_threadsafe("安装完成后请重新点击“开始生成语音”，并选择 cuda 设备。")
+            install_cmd = [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "--force-reinstall",
+                *CUDA_PYTORCH_PACKAGES,
+                "--index-url",
+                CUDA_PYTORCH_INDEX_URL,
+            ]
+            self._run_subprocess(install_cmd)
+            verify_cmd = [
+                sys.executable,
+                "-c",
+                (
+                    "import torch; "
+                    "print('PyTorch:', torch.__version__); "
+                    "print('CUDA available:', torch.cuda.is_available()); "
+                    "print('CUDA runtime:', torch.version.cuda); "
+                    "print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else '不可用')"
+                ),
+            ]
+            self._run_subprocess(verify_cmd)
+
+        self._run_python(task, "正在安装 CUDA 版 PyTorch...")
 
     def install_gguf_dependencies(self) -> None:
         if sys.platform.startswith("win"):
@@ -519,11 +599,14 @@ class NeuTTSGui(tk.Tk):
         output.parent.mkdir(parents=True, exist_ok=True)
 
         self._log_threadsafe("加载模型...")
+        backbone_device, codec_device = resolve_generation_devices(
+            device, backbone, torch, log=self._log_threadsafe
+        )
         tts = NeuTTS(
             backbone_repo=backbone,
-            backbone_device=device,
+            backbone_device=backbone_device,
             codec_repo="neuphonic/neucodec",
-            codec_device=device if device != "gpu" else "cpu",
+            codec_device=codec_device,
         )
         cache_path = ref_audio.with_suffix(".pt")
         if cache_path.exists():
@@ -607,7 +690,14 @@ class NeuTTSGui(tk.Tk):
 
     def _set_busy(self, busy: bool) -> None:
         state = DISABLED if busy else NORMAL
-        for button in (self.generate_button, self.install_button, self.gguf_button, self.repair_button, self.uninstall_button):
+        for button in (
+            self.generate_button,
+            self.install_button,
+            self.cuda_torch_button,
+            self.gguf_button,
+            self.repair_button,
+            self.uninstall_button,
+        ):
             button.configure(state=state)
         self.progress.start(12) if busy else self.progress.stop()
 
